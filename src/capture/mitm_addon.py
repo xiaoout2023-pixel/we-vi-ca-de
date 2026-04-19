@@ -55,6 +55,8 @@ class VideoCaptureAddon:
         self.wechat_request_count = 0
         self.video_capture_count = 0
         self.key_capture_count = 0
+        self.domain_stats = {}  # 统计所有域名
+        self.last_stats_time = time.time()
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.data_file = data_file or os.path.join(base_dir, "captured_data.json")
         self.log_dir = os.path.join(base_dir, "capture_logs")
@@ -72,6 +74,18 @@ class VideoCaptureAddon:
         
         if is_wechat:
             self.wechat_request_count += 1
+            
+            # 统计域名
+            from urllib.parse import urlparse
+            parsed = urlparse(flow.request.url)
+            domain = parsed.hostname or parsed.netloc
+            self.domain_stats[domain] = self.domain_stats.get(domain, 0) + 1
+            
+            # 每5秒输出一次域名统计
+            current_time = time.time()
+            if current_time - self.last_stats_time >= 5:
+                self._print_domain_stats()
+                self.last_stats_time = current_time
 
         request_info = {
             "timestamp": time.time(),
@@ -156,6 +170,21 @@ class VideoCaptureAddon:
                     if domain in url.lower():
                         logger.info(f"[可能视频] {url[:80]}")
                         break
+
+    def _print_domain_stats(self):
+        """输出微信请求的域名统计"""
+        if not self.domain_stats:
+            return
+        
+        sorted_domains = sorted(self.domain_stats.items(), key=lambda x: x[1], reverse=True)
+        top_domains = sorted_domains[:15]
+        
+        logger.info("=" * 80)
+        logger.info(f"【域名统计】(总计 {len(self.domain_stats)} 个域名, {self.wechat_request_count} 个微信请求)")
+        for i, (domain, count) in enumerate(top_domains, 1):
+            marker = "★★★" if "finder" in domain or "video" in domain else "   "
+            logger.info(f"  {marker} {i:2d}. {domain:50s} - {count:5d} 次请求")
+        logger.info("=" * 80)
 
     def _extract_decode_key_from_finder_api(self, response_data, flow):
         """从finder.weixin.qq.com API响应中提取decode_key"""
