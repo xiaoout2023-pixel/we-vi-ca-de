@@ -1,0 +1,6 @@
+- [x] Root cause identified: `python -m mitmproxy.tools.dump` has no entry point
+- [x] main.py uses correct mitmdump invocation method
+- [x] mitmdump starts successfully with addon loaded
+- [x] mitmdump stops cleanly on termination
+- [x] Test script passes all 6/6 tests
+- [x] Error messages updated with correct manual command

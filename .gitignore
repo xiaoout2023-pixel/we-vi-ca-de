@@ -1,0 +1,21 @@
+# Don't push these files
+*.log
+*.pyc
+__pycache__/
+*.pyo
+.pytest_cache/
+coverage/
+*.egg-info/
+dist/
+build/
+captured_data.json
+capture_logs/
+temp/
+output/
+.gitlocal_dir/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
