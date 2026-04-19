@@ -1,0 +1,15 @@
+# Don't push these files
+run.bat
+clean.bat
+clean.ps1
+*.log
+test_*.py
+诊断结果.md
+captured_data.json
+capture_logs/
+temp/
+output/
+__pycache__/
+*.pyc
+.trae/specs/
+.gitlocal_dir/

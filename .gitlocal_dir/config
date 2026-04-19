@@ -1,0 +1,12 @@
+[core]
+	repositoryformatversion = 0
+	filemode = false
+	bare = false
+	symlinks = false
+	ignorecase = true
+[remote "origin"]
+	url = https://github.com/xiaoout2023-pixel/we-vi-ca-de.git
+	fetch = +refs/heads/*:refs/remotes/origin/*
+[user]
+	email = xiaoout2023@pixel.com
+	name = xiaoout2023-pixel
