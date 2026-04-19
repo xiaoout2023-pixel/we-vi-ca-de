@@ -90,6 +90,22 @@ class VideoCaptureAddon:
         if is_wechat:
             url = flow.request.url
 
+            # ★ 新增：拦截 finder.weixin.qq.com API响应，提取decode_key
+            if "finder.weixin.qq.com" in url and flow.response and flow.response.text:
+                logger.info(f"★★★ 拦截到 finder.weixin.qq.com 响应: {url[:100]}")
+                try:
+                    response_text = flow.response.text[:5000]
+                    logger.info(f"响应内容（前5000字符）: {response_text}")
+                    
+                    # 尝试解析JSON
+                    try:
+                        response_data = json.loads(flow.response.text)
+                        self._extract_decode_key_from_finder_api(response_data, flow)
+                    except json.JSONDecodeError:
+                        logger.info("响应不是JSON格式，可能是protobuf或其他格式")
+                except Exception as e:
+                    logger.error(f"处理finder.weixin.qq.com响应失败: {e}")
+
             if "finder.video.qq.com" in url and "stodownload" in url:
                 self.video_capture_count += 1
                 cookie = flow.request.headers.get("Cookie", "")
@@ -132,6 +148,50 @@ class VideoCaptureAddon:
                     if domain in url.lower():
                         logger.info(f"[可能视频] {url[:80]}")
                         break
+
+    def _extract_decode_key_from_finder_api(self, response_data, flow):
+        """从finder.weixin.qq.com API响应中提取decode_key"""
+        try:
+            # 递归查找所有可能的decodeKey字段
+            self._find_decode_key_recursive(response_data, flow, path="root")
+        except Exception as e:
+            logger.error(f"提取decode_key失败: {e}")
+
+    def _find_decode_key_recursive(self, data, flow, path="root", depth=0):
+        """递归查找JSON中的decodeKey字段"""
+        if depth > 10:  # 限制递归深度
+            return
+            
+        if isinstance(data, dict):
+            for key, value in data.items():
+                current_path = f"{path}.{key}"
+                # 检查是否是decodeKey相关字段
+                if key.lower() in ['decodekey', 'decode_key', 'decodekeylist', 'decode_keys']:
+                    logger.info(f"★★★ 在 {current_path} 找到 {key}: {value}")
+                    self._save_decode_key(value, flow)
+                else:
+                    # 继续递归
+                    self._find_decode_key_recursive(value, flow, current_path, depth + 1)
+        elif isinstance(data, list):
+            for i, item in enumerate(data):
+                self._find_decode_key_recursive(item, flow, f"{path}[{i}]", depth + 1)
+
+    def _save_decode_key(self, decode_key, flow):
+        """保存decode_key到文件"""
+        if not decode_key:
+            return
+            
+        self.key_capture_count += 1
+        key_info = {
+            "decode_key": str(decode_key),
+            "source": "finder.weixin.qq.com",
+            "url": flow.request.url,
+            "timestamp": time.time(),
+            "capture_order": self.key_capture_count
+        }
+        logger.info(f"★★★ 捕获第{self.key_capture_count}个decode_key: {decode_key}")
+        self.captured_data.append(("decode_key", key_info))
+        self._save_to_file()
 
     def _extract_from_api_response(self, response_data, flow):
         try:

@@ -1,0 +1,5 @@
+- [ ] mitm_addon.py成功拦截finder.weixin.qq.com的API响应
+- [ ] 控制台输出finder.weixin.qq.com的API响应结构
+- [ ] captured_data.json中包含decode_key条目（从finder.weixin.qq.com获取）
+- [ ] decode_key包含key、url、title等完整字段
+- [ ] 视频URL和decode_key能够正确关联
