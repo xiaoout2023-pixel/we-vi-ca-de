@@ -56,6 +56,49 @@ def get_session_data_file():
 
 logger = _get_logger("mitm_addon")
 
+JS_INJECTION_CODE = """
+(function(){
+    var originalFetch = window.fetch;
+    window.fetch = function() {
+        var args = arguments;
+        var result = originalFetch.apply(this, arguments);
+        result.then(function(response) {
+            try {
+                response.clone().json().then(function(data) {
+                    function findDecodeKey(obj, depth) {
+                        if (depth > 10 || !obj) return null;
+                        if (typeof obj === 'object') {
+                            if (obj.decode_key || obj.decodeKey) {
+                                return obj.decode_key || obj.decodeKey;
+                            }
+                            if (obj.media && Array.isArray(obj.media)) {
+                                for (var i = 0; i < obj.media.length; i++) {
+                                    var key = obj.media[i].decode_key || obj.media[i].decodeKey;
+                                    if (key) return key;
+                                }
+                            }
+                            var keys = Object.keys(obj);
+                            for (var j = 0; j < keys.length; j++) {
+                                var found = findDecodeKey(obj[keys[j]], depth + 1);
+                                if (found) return found;
+                            }
+                        }
+                        return null;
+                    }
+                    var key = findDecodeKey(data, 0);
+                    if (key) {
+                        var xhr = new XMLHttpRequest();
+                        xhr.open('POST', 'http://127.0.0.1:18080/decode_key', false);
+                        xhr.send(JSON.stringify({decode_key: key}));
+                    }
+                });
+            } catch(e) {}
+        });
+        return result;
+    };
+})();
+"""
+
 
 class VideoCaptureAddon:
     def __init__(self, data_file=None):
@@ -68,8 +111,21 @@ class VideoCaptureAddon:
         self.domain_stats = {}  # 统计所有域名
         self.last_stats_time = time.time()
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        # 使用时间戳命名的数据文件
-        self.data_file = get_session_data_file() or data_file or os.path.join(base_dir, "capture_logs", f"captured_data.json")
+
+        # 确保session数据文件路径已初始化
+        data_file_from_session = get_session_data_file()
+        if data_file_from_session:
+            self.data_file = data_file_from_session
+        else:
+            # 如果还没初始化，创建一个新的时间戳文件
+            if not data_file:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                log_dir = os.path.join(base_dir, "capture_logs")
+                os.makedirs(log_dir, exist_ok=True)
+                self.data_file = os.path.join(log_dir, f"captured_data_{timestamp}.json")
+            else:
+                self.data_file = data_file
+
         self.log_dir = os.path.join(base_dir, "capture_logs")
         os.makedirs(self.log_dir, exist_ok=True)
         logger.info("=" * 60)
@@ -140,6 +196,12 @@ class VideoCaptureAddon:
                     logger.error(f"处理finder.weixin.qq.com响应失败: {e}")
 
             if "finder.video.qq.com" in url and "stodownload" in url:
+                # Only capture actual video responses, not thumbnails
+                content_type = flow.response.headers.get("Content-Type", "") if flow.response else ""
+                if "video" not in content_type.lower():
+                    # Skip thumbnails (image/jpg, etc.)
+                    return
+
                 self.video_capture_count += 1
                 cookie = flow.request.headers.get("Cookie", "")
                 video_info = {
@@ -150,8 +212,39 @@ class VideoCaptureAddon:
                     "type": "mp4"
                 }
                 logger.info(f"★★★ 捕获第{self.video_capture_count}个视频URL: {url[:80]}")
+                logger.info(f"      Cookie: {cookie[:50]}..." if cookie else "      Cookie: (empty)")
                 self.captured_data.append(("video_url", video_info))
                 self._save_to_file()
+
+            elif "channels.weixin.qq.com/web/pages/feed" in url and flow.response:
+                # Intercept the feed HTML page and inject JS to capture decode_key
+                content_type = flow.response.headers.get("Content-Type", "")
+                body = flow.response.text
+                if body and "</head>" in body:
+                    injection = f'<script>{JS_INJECTION_CODE}</script>'
+                    body = body.replace("</head>", injection + "</head>", 1)
+                    flow.response.text = body
+                    logger.info("★★★ JS注入: 已注入decode_key捕获代码到feed页面")
+                elif body and len(body) > 100:
+                    # Even if Content-Type is empty, try to inject if it looks like HTML
+                    if "<html" in body.lower() or "<!doctype" in body.lower() or "<script" in body.lower():
+                        injection = f'<script>{JS_INJECTION_CODE}</script>'
+                        if "</head>" in body:
+                            body = body.replace("</head>", injection + "</head>", 1)
+                        else:
+                            body = injection + body
+                        flow.response.text = body
+                        logger.info("★★★ JS注入: 已注入decode_key捕获代码到feed页面(无Content-Type)")
+
+            elif ("channels.weixin.qq.com" in url and ".js" in url and flow.response and
+                  "application/javascript" in flow.response.headers.get("Content-Type", "")):
+                # Inject JS into WeChat's JavaScript files
+                body = flow.response.text
+                if body and "decode_key" not in body:  # Only inject once
+                    injection = f"\n{JS_INJECTION_CODE}\n"
+                    body = injection + body
+                    flow.response.text = body
+                    logger.info(f"★★★ JS注入: 已注入decode_key捕获代码到JS文件: {url.split('/')[-1][:50]}")
 
             elif "channels.weixin.qq.com/web/api/feed" in url:
                 try:
@@ -162,6 +255,30 @@ class VideoCaptureAddon:
                     logger.error(f"解析API响应失败: {e}")
                     import traceback
                     logger.error(traceback.format_exc())
+
+            elif is_wechat and flow.response and flow.response.headers.get("Content-Type", "").startswith("application/json"):
+                # 通用JSON响应扫描：查找所有微信API返回的decode_key
+                self._scan_json_for_decode_key(flow)
+
+            elif is_wechat and flow.response:
+                # 也扫描非JSON响应中的decode_key（可能在HTML或JS中）
+                body = flow.response.text
+                if body and ('decode_key' in body or 'decodeKey' in body):
+                    logger.info(f"★★★ 在非JSON响应中发现decode_key: {url[:80]}")
+                    # 尝试从文本中提取decode_key
+                    import re
+                    # 匹配数字形式的decode_key
+                    patterns = [
+                        r'"decode_key"\s*:\s*(\d+)',
+                        r'"decodeKey"\s*:\s*(\d+)',
+                        r'decode_key["\s:=]+(\d+)',
+                        r'decodeKey["\s:=]+(\d+)',
+                    ]
+                    for pattern in patterns:
+                        matches = re.findall(pattern, body)
+                        for match in matches:
+                            logger.info(f"★★★ 提取到decode_key: {match}")
+                            self._save_decode_key(match, flow)
 
             elif ".m3u8" in url or "m3u8" in flow.request.path.lower():
                 self.video_capture_count += 1
@@ -196,6 +313,24 @@ class VideoCaptureAddon:
             marker = "★★★" if "finder" in domain or "video" in domain else "   "
             logger.info(f"  {marker} {i:2d}. {domain:50s} - {count:5d} 次请求")
         logger.info("=" * 80)
+
+    def _scan_json_for_decode_key(self, flow):
+        """扫描所有JSON响应查找decode_key"""
+        try:
+            response_text = flow.response.text
+            if not response_text or len(response_text) > 1000000:  # Skip very large responses
+                return
+
+            # Quick check if decode_key might be present
+            if 'decode_key' not in response_text and 'decodeKey' not in response_text:
+                return
+
+            response_data = json.loads(response_text)
+            self._find_decode_key_recursive(response_data, flow, path="root")
+        except json.JSONDecodeError:
+            pass
+        except Exception as e:
+            logger.error(f"JSON扫描失败: {e}")
 
     def _extract_decode_key_from_finder_api(self, response_data, flow):
         """从finder.weixin.qq.com API响应中提取decode_key"""

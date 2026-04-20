@@ -5,6 +5,8 @@ import asyncio
 import json
 from pathlib import Path
 import subprocess
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -20,7 +22,18 @@ logger = get_logger(__name__)
 OUTPUT_DIR = "output"
 TEMP_DIR = "temp"
 PROXY_PORT = 8080
-CAPTURE_DATA_FILE = str(Path(__file__).parent.parent / "captured_data.json")
+CAPTURE_LOGS_DIR = str(Path(__file__).parent.parent / "src" / "capture_logs")
+
+
+def find_latest_capture_data_file():
+    """Find the most recent captured_data_*.json file in capture_logs/"""
+    if not os.path.exists(CAPTURE_LOGS_DIR):
+        return None
+    files = [f for f in os.listdir(CAPTURE_LOGS_DIR) if f.startswith("captured_data_") and f.endswith(".json")]
+    if not files:
+        return None
+    files.sort(reverse=True)  # Sort by filename (timestamp) descending
+    return os.path.join(CAPTURE_LOGS_DIR, files[0])
 
 def check_environment():
     logger.info("Checking environment...")
@@ -114,8 +127,54 @@ async def monitor_capture(session_manager, data_file, stop_event):
             keys = sum(1 for d in captured_data if d.get("type") == "decode_key")
             print(f"\r[捕获中] 视频URL: {videos} 条 | decode_key: {keys} 条 | 按Ctrl+C结束", end="", flush=True)
             last_log_time = current_time
-        
+
         await asyncio.sleep(0.5)
+
+
+class DecodeKeyReceiver:
+    """HTTP server to receive decode_key from injected JS in the web player"""
+    def __init__(self, session_manager, port=18080):
+        self.session_manager = session_manager
+        self.port = port
+        self.server = None
+        self.thread = None
+
+    def start(self):
+        receiver = self
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                if self.path == '/decode_key':
+                    content_length = int(self.headers.get('Content-Length', 0))
+                    body = self.rfile.read(content_length)
+                    try:
+                        data = json.loads(body)
+                        decode_key = data.get('decode_key')
+                        if decode_key:
+                            logger.info(f"通过JS注入获取decode_key: {decode_key}")
+                            receiver.session_manager.add_decode_key(decode_key)
+                            self.send_response(200)
+                            self.send_header('Content-Type', 'text/plain')
+                            self.end_headers()
+                            self.wfile.write(b'OK')
+                    except Exception as e:
+                        logger.error(f"处理decode_key失败: {e}")
+                        self.send_response(400)
+                        self.end_headers()
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def log_message(self, format, *args):
+                pass  # Suppress default logging
+
+        self.server = HTTPServer(('127.0.0.1', self.port), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        logger.info(f"decode_key接收服务器已启动: http://127.0.0.1:{self.port}")
+
+    def stop(self):
+        if self.server:
+            self.server.shutdown()
 
 
 async def main():
@@ -126,6 +185,11 @@ async def main():
 
     check_environment()
     session_manager = SessionManager()
+
+    # Start decode_key receiver server (for JS injection)
+    decode_key_server = DecodeKeyReceiver(session_manager, port=18080)
+    decode_key_server.start()
+    print("decode_key接收服务器已启动 (端口 18080)")
 
     addon_path = str(Path(__file__).parent / "capture" / "mitm_addon.py")
     project_root = str(Path(__file__).parent.parent)
@@ -145,8 +209,11 @@ async def main():
         if original_proxy_server != f"127.0.0.1:{PROXY_PORT}":
             print("注意: 当前代理不是指向本工具，退出时会恢复原代理设置")
 
-    if os.path.exists(CAPTURE_DATA_FILE):
-        os.remove(CAPTURE_DATA_FILE)
+    # Remove old capture data files before starting
+    if os.path.exists(CAPTURE_LOGS_DIR):
+        for f in os.listdir(CAPTURE_LOGS_DIR):
+            if f.startswith("captured_data_") and f.endswith(".json"):
+                os.remove(os.path.join(CAPTURE_LOGS_DIR, f))
 
     print(f"\n[1/4] 正在启动 mitmdump (端口 {PROXY_PORT})...")
     
@@ -230,7 +297,21 @@ async def main():
         print("可尝试手动设置代理")
 
     stop_event = asyncio.Event()
-    monitor_task = asyncio.create_task(monitor_capture(session_manager, CAPTURE_DATA_FILE, stop_event))
+
+    # Find the capture data file (will be created by mitmdump addon)
+    print("等待捕获数据文件...")
+    capture_data_file = None
+    for _ in range(20):  # Wait up to 10 seconds
+        await asyncio.sleep(0.5)
+        capture_data_file = find_latest_capture_data_file()
+        if capture_data_file:
+            print(f"找到数据文件: {capture_data_file}")
+            break
+    else:
+        print("警告: 未找到数据文件，使用默认路径")
+        capture_data_file = os.path.join(CAPTURE_LOGS_DIR, "captured_data.json")
+
+    monitor_task = asyncio.create_task(monitor_capture(session_manager, capture_data_file, stop_event))
 
     print("\n" + "=" * 60)
     print("等待捕获数据...")
