@@ -4,16 +4,12 @@ import re
 import os
 import sys
 import logging
-from datetime import datetime
 from mitmproxy import http
 
 # Self-contained logging setup to avoid import issues when loaded by mitmdump
 _loggers = {}
-_session_log_file = None
 
 def _get_logger(name):
-    global _session_log_file
-    
     if name in _loggers:
         return _loggers[name]
     logger = logging.getLogger(name)
@@ -27,20 +23,17 @@ def _get_logger(name):
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
         
-        # File handler - save to timestamped file
+        # File handler - save to FIXED location (always overwrites)
         log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "capture_logs")
         os.makedirs(log_dir, exist_ok=True)
+        log_file = os.path.join(log_dir, "capture.log")
         
-        if _session_log_file is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            _session_log_file = os.path.join(log_dir, f"mitm_{timestamp}.log")
-        
-        file_handler = logging.FileHandler(_session_log_file, encoding='utf-8')
+        file_handler = logging.FileHandler(log_file, mode='w', encoding='utf-8')
         file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
         
-        logger.info(f"Logger initialized, outputting to console and {_session_log_file}")
+        logger.info(f"Logger initialized, output to: {log_file}")
     _loggers[name] = logger
     return logger
 
