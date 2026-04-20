@@ -4,12 +4,22 @@ import re
 import os
 import sys
 import logging
+from datetime import datetime
 from mitmproxy import http
 
 # Self-contained logging setup to avoid import issues when loaded by mitmdump
 _loggers = {}
+_session_timestamp = None
+_session_log_file = None
+_session_data_file = None
 
 def _get_logger(name):
+    global _session_timestamp, _session_log_file, _session_data_file
+    
+    # 生成时间戳（只在第一次调用时）
+    if _session_timestamp is None:
+        _session_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
     if name in _loggers:
         return _loggers[name]
     logger = logging.getLogger(name)
@@ -23,19 +33,26 @@ def _get_logger(name):
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
         
-        # File handler - save to FIXED location (always overwrites)
+        # File handler - save to timestamped file
         log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "capture_logs")
         os.makedirs(log_dir, exist_ok=True)
-        log_file = os.path.join(log_dir, "capture.log")
+        _session_log_file = os.path.join(log_dir, f"capture_{_session_timestamp}.log")
+        _session_data_file = os.path.join(log_dir, f"captured_data_{_session_timestamp}.json")
         
-        file_handler = logging.FileHandler(log_file, mode='w', encoding='utf-8')
+        file_handler = logging.FileHandler(_session_log_file, mode='w', encoding='utf-8')
         file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
         
-        logger.info(f"Logger initialized, output to: {log_file}")
+        logger.info(f"Session timestamp: {_session_timestamp}")
+        logger.info(f"Log file: {_session_log_file}")
+        logger.info(f"Data file: {_session_data_file}")
     _loggers[name] = logger
     return logger
+
+def get_session_data_file():
+    """获取当前会话的数据文件路径"""
+    return _session_data_file
 
 logger = _get_logger("mitm_addon")
 
@@ -51,7 +68,8 @@ class VideoCaptureAddon:
         self.domain_stats = {}  # 统计所有域名
         self.last_stats_time = time.time()
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        self.data_file = data_file or os.path.join(base_dir, "captured_data.json")
+        # 使用时间戳命名的数据文件
+        self.data_file = get_session_data_file() or data_file or os.path.join(base_dir, "capture_logs", f"captured_data.json")
         self.log_dir = os.path.join(base_dir, "capture_logs")
         os.makedirs(self.log_dir, exist_ok=True)
         logger.info("=" * 60)
